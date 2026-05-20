@@ -482,27 +482,102 @@ class AssetLibraryView(ttk.Frame):
         self._gen_thread.start()
 
     def _gen_worker(self, indices: list):
-        # Engine is read live from main_window — image vs SFX provider
+        if not self.main.current_project:
+            self.after(0, lambda: self._status_var.set("❌ Error: No open project."))
+            return
+
+        # Check API key before starting
         if self.asset_kind in ("brolls", "graphics"):
+            if not self.main.settings.get("openrouter_api_key"):
+                self.after(0, lambda: messagebox.showwarning("⚠ Missing API key",
+                    "OpenRouter API key is not set. Add it in ⚙ Settings.",
+                    parent=self))
+                self.after(0, lambda: self._status_var.set("❌ Missing API key."))
+                return
             engine = (f"{self.main.image_provider_var.get()} / "
                       f"{self.main.image_model_slug_var.get() or '(no model)'}")
         else:
+            if not self.main.settings.get("elevenlabs_api_key"):
+                self.after(0, lambda: messagebox.showwarning("⚠ Missing API key",
+                    "ElevenLabs API key is not set. Add it in ⚙ Settings.",
+                    parent=self))
+                self.after(0, lambda: self._status_var.set("❌ Missing API key."))
+                return
             engine = "ElevenLabs text-to-SFX"
+
+        from llm_clients import OpenRouterClient, ElevenLabsClient, translate_ru_to_en
+        proj = self.main.current_project
         total = len(indices)
+        done = 0
+        failed = 0
+
         for n, idx in enumerate(indices, start=1):
             if self._gen_cancel.is_set():
                 self.after(0, lambda: self._status_var.set("⏸ Cancelled."))
                 return
+            
             asset = self._assets[idx]
+            asset_id = asset.get("id") or self._id_for_index(idx)
             self.after(0, lambda i=idx, n=n, t=total: self._status_var.set(
                 f"🔄 [{n}/{t}] generating {self.asset_kind} #{i + 1} via {engine}…"))
-            # Stub: simulate render time
-            time.sleep(0.6 if self.asset_kind == "brolls" else 0.3)
-            # Mark as 'generated' with a path that's a real placeholder file path
-            # (the actual file is NOT written here — only the metadata)
-            self._assets[idx]["status"] = "generated"
-            self._assets[idx]["file_path"] = self._file_path_for(asset.get("id") or self._id_for_index(idx))
-            self.after(0, self._refresh_tree)
+
+            try:
+                # 1. Translate Russian prompt if any
+                raw_prompt = asset.get("prompt") or ""
+                self.after(0, lambda i=idx, n=n, t=total: self._status_var.set(
+                    f"🔄 [{n}/{t}] translating prompt for #{i + 1}…"))
+                
+                translated_prompt = translate_ru_to_en(
+                    raw_prompt,
+                    self.main.text_provider_var.get(),
+                    self.main.settings,
+                    self.main.text_model_slug_var.get()
+                )
+
+                # 2. Call generator
+                self.after(0, lambda i=idx, n=n, t=total: self._status_var.set(
+                    f"🔄 [{n}/{t}] generating asset for #{i + 1}…"))
+
+                if self.asset_kind in ("brolls", "graphics"):
+                    model_slug = self.main.image_model_slug_var.get()
+                    client = OpenRouterClient(
+                        self.main.settings.get("openrouter_api_key", ""), model_slug)
+                    img_bytes, ext = client.generate_image(
+                        translated_prompt, model=model_slug, aspect_ratio="16:9")
+                    
+                    target_path = projects.inserts_asset_path(proj, self.asset_kind, asset_id, ext)
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_bytes(img_bytes)
+                else:
+                    client = ElevenLabsClient(self.main.settings.get("elevenlabs_api_key", ""))
+                    duration = asset.get("duration")
+                    try:
+                        duration_seconds = float(duration) if duration else None
+                    except (ValueError, TypeError):
+                        duration_seconds = None
+                    
+                    audio_bytes = client.sfx(translated_prompt, duration_seconds=duration_seconds)
+                    ext = self.kcfg["file_ext"] # .mp3
+                    target_path = projects.inserts_asset_path(proj, self.asset_kind, asset_id, ext)
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_bytes(audio_bytes)
+
+                # 3. Mark as generated and save path
+                self._assets[idx]["status"] = "generated"
+                self._assets[idx]["file_path"] = f"inserts/{self.asset_kind}/{asset_id}{ext}"
+                done += 1
+                self.after(0, self._refresh_tree)
+                self.after(0, self._schedule_autosave)
+            except Exception as e:
+                failed += 1
+                from debug_log import DEBUG_LOG
+                DEBUG_LOG.log_exception(f"inserts_tab.gen_worker.#{idx+1}", e)
+                err_msg = str(e)
+                self.after(0, lambda i=idx, msg=err_msg: self._status_var.set(
+                    f"❌ #{i + 1} failed: {msg[:120]}"))
+                # Wait briefly before continuing so the user can read the error message
+                time.sleep(2.0)
+
         self.after(0, lambda: self._status_var.set(
-            f"✅ Done — {total} {self.asset_kind} {'asset' if total == 1 else 'assets'} "
-            f"marked generated (rendering via {engine} pending real API wiring)."))
+            f"✅ Done — {done} generated, {failed} failed."))
+        self.after(0, self.main._refresh_all_tab_marks)

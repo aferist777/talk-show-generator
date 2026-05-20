@@ -5948,13 +5948,56 @@ class StudioShootTab(ttk.Frame):
         framing = cfg.KEYFRAME_FRAMING_BY_SHOT.get(
             shot, cfg.KEYFRAME_FRAMING_BY_SHOT[cfg.DEFAULT_KEYFRAME_SHOT])
         head_phrase = self._build_head_orientation_phrase_for_part(beat_idx, part_idx)
+
+        # ── DIALOGUE & KEYFRAME PRE-ANALYSIS AGENT (Sprint 2.1) ──────
+        parts = beat.get("parts") or []
+        part = parts[part_idx - 1] if 1 <= part_idx <= len(parts) else {}
+        dialogue_text = part.get("text") or ""
+        
+        # Determine chosen performance/emotional style
+        style_custom = part.get("style_custom") or ""
+        style_options = part.get("style_options") or []
+        style_selected_idx = part.get("style_selected_idx") or 0
+        if style_custom.strip():
+            style_guideline = style_custom.strip()
+        elif style_options and 0 <= style_selected_idx < len(style_options):
+            style_guideline = style_options[style_selected_idx].strip()
+        else:
+            style_guideline = "Neutral expression, professional talk-show guest posture."
+
+        # Run the Dialogue Pre-Analysis Agent pass using LLM to generate starting visual description
+        try:
+            from debug_log import DEBUG_LOG
+            DEBUG_LOG.log_info("keyframe_pre_analysis",
+                               f"Running dialogue analysis for beat {beat_idx + 1}.{part_idx}")
+            client = self.main._build_client()
+            sys_template = PROMPT_STORE.get_active_template("keyframe_pre_analysis_system")
+            user_prompt = PROMPT_STORE.render("keyframe_pre_analysis_user",
+                character_name=speaker,
+                role=role,
+                gender=gender,
+                framing=framing,
+                head_orientation=head_phrase,
+                dialogue_text=dialogue_text,
+                style_guideline=style_guideline)
+            visual_pose_description = client.complete(
+                system=sys_template, user=user_prompt, max_tokens=1000, temperature=0.6)
+            visual_pose_description = visual_pose_description.strip()
+            DEBUG_LOG.log_info("keyframe_pre_analysis",
+                               f"Analysis result: {visual_pose_description}")
+        except Exception as e:
+            from debug_log import DEBUG_LOG
+            DEBUG_LOG.log_exception("keyframe_pre_analysis_failed", e)
+            visual_pose_description = style_guideline
+
         prompt = PROMPT_STORE.render("keyframe_prompt",
             shot_label=shot,
             character_name=speaker,
             role=role,
             gender=gender,
             framing=framing,
-            head_orientation=head_phrase)
+            head_orientation=head_phrase,
+            visual_pose_description=visual_pose_description)
         model_slug = self.main.image_model_slug_var.get()
         from llm_clients import OpenRouterClient
         client = OpenRouterClient(

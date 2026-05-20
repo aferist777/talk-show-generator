@@ -675,6 +675,39 @@ class ElevenLabsClient:
         except urllib.error.URLError as e:
             raise RuntimeError(f"Cannot reach ElevenLabs: {e.reason}") from e
 
+    def sfx(self, text: str, duration_seconds: float = None,
+            prompt_influence: float = 0.3) -> bytes:
+        """Generate a sound effect via ElevenLabs. Returns raw MP3/WAV bytes.
+        Raises RuntimeError on failure.
+        """
+        if not self.api_key:
+            raise RuntimeError("ElevenLabs API key is not set.")
+        url = f"{self.BASE_URL}/sound-generation"
+        payload = {
+            "text": text,
+            "prompt_influence": float(prompt_influence)
+        }
+        if duration_seconds is not None:
+            payload["duration_seconds"] = float(duration_seconds)
+            
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "xi-api-key": self.api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"ElevenLabs SFX HTTP {e.code}: {body[:500]}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Cannot reach ElevenLabs: {e.reason}") from e
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Factory
@@ -688,3 +721,27 @@ def make_client(provider: str, settings: dict, model: str) -> LLMClient:
     if provider == "anthropic":
         return AnthropicClient(settings.get("anthropic_api_key", ""), model)
     raise ValueError(f"Unknown provider: {provider}")
+
+
+def translate_ru_to_en(text: str, provider: str, settings: dict, model: str) -> str:
+    """Translate Russian text to English using the configured LLM client.
+    Returns the original text if no Russian is detected or translation fails.
+    """
+    if not text or not text.strip():
+        return text
+    # Simple check for Cyrillic characters
+    has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in text)
+    if not has_cyrillic:
+        return text
+    try:
+        client = make_client(provider, settings, model)
+        system = (
+            "You are a professional translator. Translate the given Russian text "
+            "to clear, vivid, descriptive English. Output ONLY the English translation, "
+            "without quotes, explanations, or preamble."
+        )
+        translated = client.complete(system=system, user=text, max_tokens=1000, temperature=0.3)
+        return translated.strip()
+    except Exception as e:
+        DEBUG_LOG.log_info("translation_failed", f"Failed to translate: {e}")
+        return text
