@@ -1,0 +1,10 @@
+# TalkShow Generator dependencies
+#
+# All HTTP calls are done with the stdlib (urllib), so there are no
+# required pip packages. Tkinter is included with Python on most
+# platforms.
+#
+# Optional: if you want a nicer-looking interface on Linux, install:
+#   sudo apt-get install python3-tk
+#
+# Optional: install Ollama from https://ollama.com to run models locally.
